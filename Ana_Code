@@ -1,0 +1,396 @@
+library(tidyverse)
+library(arsenal)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(sjPlot)
+library(caret)
+library(lubridate)
+library(recipes)
+
+ana <- read.csv('tab_ana.csv', dec = ',', sep = ';', stringsAsFactors = FALSE)
+str(ana)
+ana <- ana[1:193, ]
+
+##Curva ROC
+ROC <- roc(ana$Stone, ana$Total.Score)
+plot.roc(ROC, print.auc = TRUE, col = 'blue')
+
+ROC2 <- roc(ana$Stone, ana$Stone.Size)
+plot.roc(ROC2, add = TRUE, col = 'red', print.auc = TRUE,  print.auc.y = .4)
+
+ROC3 <- roc(ana$Stone, ana$Involved.Calyces)
+plot.roc(ROC3, add = TRUE, col = 'green', print.auc = TRUE,  print.auc.y = .6)
+
+ROC4 <- roc(ana$Stone, ana$Obstruction)
+plot.roc(ROC4, add = TRUE, col = 'tomato2', print.auc = TRUE,  print.auc.y = .3)
+
+ROC5 <- roc(ana$Stone, ana$Stone.essence)
+plot.roc(ROC4, add = TRUE, col = 'black', print.auc = TRUE,  print.auc.y = .2)
+
+
+##Categoriação
+ana$Sex[ana$Sex == 'O'] <- '0'
+ana$Sex <- factor(ana$Sex, levels = c(0,1), labels = c('female','male'))
+ana$Laterality <- factor(ana$Laterality, levels = c(0,1), labels = c('right','left'))
+ana$Stone.Score <- factor(ana$Stone.Score, levels = c(1,2,3,4),
+                           labels = c('<400','400-799','800-1599','>1600'))
+ana$Tract.Lenght <- factor(ana$Tract.Lenght, levels = c(1,2),
+                           labels = c('< 100','> 100'))
+ana$Obstruction <- factor(ana$Obstruction, levels = c(1,2),
+                          labels = c('no or mild','moderate or severe'))
+ana$Involved.Calyces <- factor(ana$Involved.Calyces, levels = c(1,2,3),
+                               labels = c('1-2','3','staghor'))
+ana$Stone.essence <- factor(ana$Stone.essence, levels = c(1,2),
+                            labels = c('< 950','> 950'))
+ana$Classification <- factor(ana$Classification, levels = c('LOW','MODERATE','HIGH'))
+ana$Image.Method <- factor(ana$Image.Method, levels = c(1,2,3),
+                           labels = c('CT','Rx','Us'))
+ana$Stone <- factor(ana$Stone, levels = c(0,1), labels = c('Non_Stone_Free','Stone_Free'))
+ana$SURGERY.DATA[ana$SURGERY.DATA == '28.04.0215'] = '28.04.2015'
+ana$SURGERY.DATA[ana$SURGERY.DATA == '20.02.0218'] = '20.02.2018'
+ana$SURGERY.DATA <- as.Date(ana$SURGERY.DATA, format = '%d.%m.%Y')
+ana$semana <- wday(ana$SURGERY.DATA, label = TRUE)
+ana$ano <- year(ana$SURGERY.DATA)
+
+##Análise
+ana_analysis <- ana %>%
+  select(-ID, -Name, -SURGERY.DATA, -LENGTH, -WIDHT, -image)
+
+##Distribuição normal
+ana_cont <- select_if(ana_analysis, is.numeric)
+sapply(ana_cont, shapiro.test)
+
+##Table 01
+my_controls <- tableby.control(
+  test = T,
+  total = T,
+  numeric.test = "kwt", cat.test = "chisq",
+  numeric.stats = c("meansd", "medianq1q3", "range"),
+  cat.stats = c("countpct"),
+  stats.labels = list(
+    meansd = "Mean (SD)",
+    medianq1q3 = "Median (Q1, Q3)",
+    range = "Min - Max"))
+
+
+table01 <- tableby(Stone ~ . , data = ana_analysis, control = my_controls)
+summary(table01, digits = 2, pfootnote = TRUE)
+write2html(table01, "~/Tabela1.html")
+
+##Logistic Regression
+model_01 <- glm(Stone ~  Stone.Size + Skin.Stone.Distance + Involved.Calyces +
+                  Classification, data = ana, family = 'binomial')
+summary(model_01)
+tab_model(model_01, auto.label = FALSE)
+plot_model(model_01)
+
+model_02 <- step(model_01, method = 'both')
+summary(model_02)
+##Plots
+ggplot(ana, aes(semana, fill = Stone))+
+  geom_bar()
+
+ggplot(ana, aes(Total.Score, fill = Stone))+
+  geom_histogram()
+
+ggplot(ana, aes(as.factor(Total.Score), fill = Stone))+
+  geom_bar()+
+  labs(x = 'Total Score')
+
+ggplot(ana, aes(Total.Score, fill = Stone))+
+  geom_density()
+
+ggplot(ana, aes(Stone, Total.Score, fill = Stone))+
+  geom_boxplot()
+
+ggplot(ana, aes(Stone.Size, fill = Involved.Calyces))+
+  geom_histogram()+
+  facet_wrap(~ Stone)
+
+ggplot(ana, aes(Skin.Stone.Distance, fill = Stone))+
+  geom_density()
+
+ggplot(ana, aes(log(Skin.Stone.Distance), fill = Stone))+
+  geom_density()
+
+hist(log(ana$Stone.Size))
+
+##Analise evolutiva ao longo tempo
+ana_ano <- ana %>%
+  group_by(ano) %>%
+  count(Stone) %>%
+  mutate(perc = n / sum(n) ) %>%
+  filter(Stone == 'Stone_Free')
+  
+ggplot(ana_ano, aes(ano, perc))+
+  geom_point(color = 'tomato2', size = 2)+
+  coord_flip()+
+  geom_segment(aes(xend = ano, yend = 0), color = 'tomato2', size = 1.2)+
+  labs(x = '', y = '% Stone Free')
+
+
+ggplot(ana_ano, aes(ano, n, color = Stone))+
+  geom_path()
+
+##Decision Tree
+ana_analysis <- ana_analysis %>%
+  select(-Image.Method)
+
+part01 <- rpart(Stone ~ . , data = ana_analysis)
+rpart.plot(part01, type = 5)
+
+##Caret
+ana_analysis <- ana %>%
+  select(-ID, -Name, -SURGERY.DATA, -LENGTH, -WIDHT, -Image.Method, -image, -Stone.Score, -Classification, -semana, - ano)
+summary(ana_analysis)
+
+set.seed(1234)
+index <- createDataPartition(ana_analysis$Stone, p = 0.8, list = FALSE)
+ana_train <- ana_analysis[index, ]
+ana_test <- ana_analysis[-index, ]
+
+
+## Using Recipes ###########################
+preproc <- recipe(Stone ~ . , data = ana_train) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_BoxCox(all_numeric()) %>%
+  step_dummy(all_predictors(), -all_numeric()) %>%
+  step_corr(all_predictors(), threshold = 0.9) %>%
+  step_nzv(all_predictors())
+
+prep <- prep(preproc, ana_train)
+ana_train <- bake(prep, ana_train)
+ana_test <- bake(prep, ana_test)
+  
+  
+set.seed(1234)
+control <- trainControl(
+  method = 'cv',
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE)
+
+
+##rpart
+set.seed(1234)
+model_rpart <- train(Stone ~ .,
+                   data = ana_train,
+                   method = "rpart",
+                   metric = 'ROC',
+                   trControl = control)
+
+model_rpart
+predito <- predict(model_rpart, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_rpart))
+rpart.plot(model_rpart$finalModel, type = 5)
+
+##SVM
+set.seed(1234)
+model_svm <- train(Stone ~ .,
+                   data = ana_train,
+                   method = "svmRadial",
+                   metric = 'ROC',
+                   tuneLenght = 10,
+                   trControl = control,
+                   preProc = c('scale','center','BoxCox','nzv'))
+
+predito <- predict(model_svm, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_svm))
+
+##SVM2
+set.seed(1234)
+model_svm2 <- train(Stone ~ .,
+                   data = ana_train,
+                   method = "svmPoly",
+                   metric = 'ROC',
+                   trControl = control,
+                   preProc = c('scale','center','BoxCox','nzv'))
+
+predito <- predict(model_svm2, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_svm2))
+
+##Rf
+set.seed(1234)
+model_rf <- train(Stone ~ .,
+                  data = ana_train,
+                  method = "rf",
+                  metric = 'ROC',
+                  trControl = control)
+
+predito <- predict(model_rf, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_rf))
+
+##gbm
+set.seed(1234)
+model_gbm <- train(Stone ~ .,
+                  data = ana_train,
+                  method = "xgbTree",
+                  metric = 'ROC',
+                  trControl = control)
+
+predito <- predict(model_gbm, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_gbm))
+
+##StepAIC
+set.seed(1234)
+model_step <- train(Stone ~ .,
+                   data = ana_train,
+                   method = "glmStepAIC",
+                   preProc = c('center','scale','BoxCox'),
+                   metric = 'ROC',
+                   trControl = control)
+
+summary(model_step$finalModel)
+sjt.glm(model_step$finalModel)
+predito <- predict(model_step, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+plot(varImp(model_step))
+
+
+##Knn
+set.seed(1234)
+model_knn <- train(Stone ~ .,
+                    data = ana_train,
+                    method = "knn",
+                    preProc = c('center','scale','BoxCox'),
+                    metric = 'ROC',
+                    trControl = control)
+
+predito <- predict(model_knn, ana_test)
+confusionMatrix(ana_test$Stone, predito)
+
+##ROC
+predito <- predict(model_svm2, ana_test, type = 'prob')
+ROC <- roc(ana_test$Stone, predito[,'Stone_Free'])
+plot(ROC)
+
+
+##Testar os Diferentes Modelos
+models <- resamples(list('rpart' = model_rpart,
+                         'SVM Radial' = model_svm,
+                         'SVM Poli' = model_svm2,
+                         'RF' = model_rf,
+                         'Boost Tree' = model_gbm,
+                         'GLM Step' = model_step))
+bwplot(models)
+
+##Exemplo Modelo
+library(predictshine)
+predictshine(model_02)
+
+
+################################
+##Visualização com lime ########
+################################
+library(lime)
+
+##Objeto lime
+explain_caret <- lime(ana_train, model_svm2)
+explain_caret
+
+
+##lime Explain
+explanation_caret <- explain(
+  x = ana_test[1:6,], 
+  explainer = explain_caret, 
+  n_permutations = 5000,
+  dist_fun = "gower",
+  kernel_width = .75,
+  n_features = 10, 
+  feature_select = "highest_weights",
+  labels = "Stone_Free"
+)
+
+##Plots
+plot_features(explanation_caret)
+plot_explanations(explanation_caret)
+
+
+
+###Caret Esemble #####################################
+### Média de 3 modelos ###############################
+
+predito1 <- predict(model_svm2, ana_test, type = 'prob')
+predito2 <- predict(model_rf, ana_test, type = 'prob')
+predito3 <- predict(model_knn, ana_test, type = 'prob')
+
+pred_global <- (predito1['Stone_Free'] + predito2['Stone_Free'] + predito3['Stone_Free']) / 3
+pred_values <- ifelse(pred_global > 0.50, 'Stone_Free','Non_Stone_Free')
+
+confusionMatrix(ana_test$Stone, pred_values)
+
+
+######################### H2O ##############################################33
+library(h2o)
+
+#Inicialização
+h2o.init()
+
+# Tranformar objeto h2o
+ana.hex <- as.h2o(ana_analysis, destionation_frame = 'ana.hex')
+
+# estrutura
+h2o.str(ana.hex)
+
+# Split Data Frame
+ana.split <- h2o.splitFrame(data = ana.hex, ratios = 0.75)
+ana_train <- ana.split[[1]]
+ana_test <- ana.split[[2]]
+
+#visualize
+h2o.summary(ana_train)
+
+# Model GBM
+ana.gbm <- h2o.gbm(x = 1:13, y = 14, training_frame = ana_train, ntrees = 10,
+                   max_depth = 4, min_rows = 2, learn_rate = 0.2,
+                   nfolds = 10)
+
+ana.gbm@model$scoring_history
+
+
+predito <- h2o.predict(ana.gbm, newdata = ana_test)
+h2o.confusionMatrix(ana.gbm, ana_test)
+
+# Model Rf
+ana.rf <- h2o.randomForest(x = 1:13, y = 14, training_frame = ana_train,
+                           nfolds = 10)
+
+ana.rf@model$scoring_history
+h2o.confusionMatrix(ana.rf, ana_test)
+
+perf <- h2o.performance(ana.rf, ana_test)
+h2o.varimp(ana.rf)
+h2o.varimp_plot(ana.rf)
+
+##Deep learning
+ana.deep <- h2o.deeplearning(x = 1:13, y = 14, training_frame = ana_train,
+                             nfolds = 10)
+
+h2o.performance(ana.deep, ana_test)
+h2o.varimp_plot(ana.deep)
+
+## Deployment
+modelfile <- h2o.download_mojo(ana.rf,  get_genmodel_jar=TRUE)
+
+
+################## Exemple 2 ######################################
+path <- system.file("extdata", "prostate.csv", package="h2o")
+h2o_df <- h2o.importFile(path)
+h2o_df$CAPSULE <- as.factor(h2o_df$CAPSULE)
+model <- h2o.gbm(y="CAPSULE",
+                 x=c("AGE", "RACE", "PSA", "GLEASON"),
+                 training_frame=h2o_df,
+                 distribution="bernoulli",
+                 ntrees=100,
+                 max_depth=4,
+                 learn_rate=0.1)
+
+h2o.performance(model)
+modelfile <- h2o.download_mojo(model, get_genmodel_jar=TRUE)
