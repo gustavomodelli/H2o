@@ -1,0 +1,214 @@
+library(tidyverse)
+library(caret)
+library(recipes)
+library(h2o)  #h2o models
+
+##Example Data from Energy Building
+##Aim to compare the Caret with H2o in a reduced data
+
+energy <- read.csv(file = 'energy.csv', sep = ',', dec = '.', stringsAsFactors = FALSE)
+str(energy)
+summary(energy)
+
+#Var names
+nomes <- c('Relative_Compactness','Surface_Area','Wall_Area','Roof_Area','Overall_Height','Orientation','Glazing_area','Glazing_area_distribution','Heating_Load','Cooling_Load')
+names(energy) <- nomes
+
+##Plot with Caret
+featurePlot(x = energy[1:8], y = energy$Heating_Load, plot = 'scatter')
+
+##Distribution of outcome
+ggplot(energy, aes(Heating_Load))+
+  geom_histogram(fill = 'blue')
+
+ggplot(energy, aes(Relative_Compactness, Heating_Load))+
+  geom_point()
+
+##Categorical
+energy <- energy %>% 
+  mutate(Orientation = factor(Orientation, labels = c('North','East','South','West')),
+         Glazing_area_distribution = factor(Glazing_area_distribution)
+         )
+
+#A simple linear model with Y1
+model_01 <-lm(Heating_Load ~ ., data = energy[1:9])
+summary(model_01)
+
+##Correlations between predictors
+numeric_vars <- select_if(energy[1:8], is.numeric)
+corr <- cor(numeric_vars)
+corrplot::corrplot(corr, method = 'number', type = 'upper')
+
+##Test a linear model wiht partition
+index <- createDataPartition(energy$Heating_Load, p = 0.75, list = FALSE)
+energy_train <- energy[index, 1:9] ##drop Y2
+energy_test <- energy[-index, 1:9] ##drop Y2
+
+#A linear model without preprocess
+model_01 <- lm(Heating_Load ~ . , data = energy_train)
+predito <- predict(model_01, energy_test)
+R2(predito, energy_test$Heating_Load)
+RMSE(predito, energy_test$Heating_Load)
+
+#Preprocess
+rec <- recipe(Heating_Load ~ . , data = energy_train) %>%
+  step_corr(all_numeric(), -all_outcomes(), threshold = 0.9) %>%
+  step_YeoJohnson(all_predictors(), - all_nominal()) %>%
+  step_scale(all_predictors(), -all_nominal()) %>%
+  step_center(all_predictors(), -all_nominal()) %>%
+  step_dummy(all_nominal()) %>% 
+  step_log(all_outcomes())
+
+preparo <- prep(rec, energy_train)
+
+ener_train <- bake(preparo, energy_train)
+ener_test <- bake(preparo, energy_test)
+
+##Caret
+set.seed(1234)
+control <- trainControl(
+  method = 'cv',
+  number = 10)
+
+##glm
+set.seed(1234)
+model_glm <- train(Heating_Load  ~ .,
+                   data = ener_train,
+                   method = "glmStepAIC",
+                   metric = 'RMSE',
+                   trControl = control)
+
+model_glm
+predito <- predict(model_glm, ener_test)
+RMSE(predito, ener_test$Heating_Load)
+summary(model_glm$finalModel)
+
+##SVM
+set.seed(1234)
+model_svm <- train(Heating_Load ~ .,
+                   data = ener_train,
+                   method = "svmRadial",
+                   metric = 'RMSE',
+                   tuneLenght = 10,
+                   trControl = control)
+
+predito <- predict(model_svm, ener_test)
+RMSE(predito, ener_test$Heating_Load)
+
+
+##rf
+set.seed(1234)
+model_rf <- train(Heating_Load ~ .,
+                   data = ener_train,
+                   method = "rf",
+                   metric = 'RMSE',
+                   tuneLenght = 10,
+                   trControl = control)
+
+predito <- predict(model_rf, ener_test)
+RMSE(predito, ener_test$Heating_Load)
+
+##Plot outcome
+out <- ener_test %>%
+  mutate(predito = predito,
+         residual = Heating_Load - predito)
+
+ggplot(out, aes(predito, Heating_Load))+
+  geom_point()
+
+ggplot(out, aes(Heating_Load, residual))+
+  geom_point()
+
+##resamples
+samples <- resamples(list('glm' = model_glm,
+                          'svm' = model_svm,
+                          'rf' = model_rf))
+
+bwplot(samples)
+
+#####################################################
+###H2o###############################################
+##Pass preProcess Data do H2o
+#####################################################
+h2o.init(nthreads = -1)
+
+h2o_data <- bake(preparo, energy[1:9])
+
+##outcome para o fim
+h2o_data <- h2o_data %>% 
+  select(Heating_Load, everything())
+  
+str(h2o_data)
+
+##Import file from R
+energy_data <- as.h2o(h2o_data, destination_frame = 'energy_data')
+
+##Visualize str
+h2o.str(energy_data)
+h2o.dim(energy_data)
+
+##Desrible
+h2o.describe(energy_data)
+
+##Split data (train and test)
+split <- h2o.splitFrame(energy_data, ratios = 0.75)
+energy_train <- split[[1]]
+energy_test <- split[[2]]
+
+##Model Rf
+energy.rf <- h2o.randomForest(x = 2:13, y = 1, training_frame = energy_train,
+                           nfolds = 10, seed = 123)
+
+h2o.performance(energy.rf, newdata = energy_test)
+h2o.varimp_plot(energy.rf)
+
+##Tune Rf
+g <- h2o.grid('randomForest',
+              hyper_params = list(
+                ntrees = c(50, 100, 120),
+                max_depth = c(30, 40, 60),
+                min_rows = c(1, 2)),
+              x = 2:13, y = 1, training_frame = energy_train, nfolds = 10
+              )
+
+##Another grid search 'Discrete'
+g <- h2o.grid('randomForest',
+              search_criteria = list(
+                strategy = 'RandomDiscrete',
+                stopping_metric = 'mse',
+                stopping_tolerance = 0.001,
+                stopping_rounds = 10,
+                max_runtime_secs = 120
+              ),
+              hyper_params = list(
+                ntrees = c(50, 100, 150, 200, 250),
+                mtries = c(2, 3, 4, 5),
+                sample_rate = c(0.5, 0.632, 0.8, 0.95),
+                col_sample_rate_per_tree = c(0.5, 0.9, 1.0)
+              ),
+              x = 2:13, y = 1, training_frame = energy_train, nfolds = 5,
+              max_depth = 40,
+              stopping_metric = 'deviance',
+              stopping_tolerance = 0,
+              stopping_rounds = 4,
+              score_tree_interval = 3
+)
+
+##Model Rf Tune
+energy.rf2 <- h2o.randomForest(x = 2:13, y = 1, training_frame = energy_train,
+                               ntrees = 120, max_depth = 30, min_rows = 1.0,
+                              nfolds = 10, seed = 123, model_id = 'energy_Tune')
+
+h2o.performance(energy.rf2, newdata = energy_test)
+
+
+# Model GBM
+energy.gbm <- h2o.gbm(x = 2:13, y = 1, training_frame = energy_train, ntrees = 10,
+                   max_depth = 4, min_rows = 2, learn_rate = 0.2,
+                   nfolds = 10, seed = 123, model_id = 'energyGBM')
+
+h2o.performance(energy.gbm, newdata = energy_test)
+h2o.varimp_plot(energy.gbm)
+
+##Flow
+h2o.flow()
