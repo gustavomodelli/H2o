@@ -1,0 +1,139 @@
+library(tidyverse)
+library(h2o)
+
+##Example Data from Energy Building
+##Using H2o without preProcess in r
+
+energy <- read.csv(file = 'energy.csv', sep = ',', dec = '.', stringsAsFactors = FALSE)
+str(energy)
+
+#Var names
+nomes <- c('Relative_Compactness','Surface_Area','Wall_Area','Roof_Area','Overall_Height','Orientation','Glazing_area','Glazing_area_distribution','Heating_Load','Cooling_Load')
+names(energy) <- nomes
+
+##Categorical
+energy <- energy %>% 
+  mutate(Orientation = factor(Orientation, labels = c('North','East','South','West')),
+         Glazing_area_distribution = factor(Glazing_area_distribution)
+  )
+
+##Predict Y2 = Cooling_Load because this is most dificiult
+##Remove Heating_Load
+energy <- energy %>% select(-Heating_Load)
+
+
+##Distribuction of Cooling_load
+ggplot(energy, aes(Cooling_Load))+
+  geom_histogram(fill ='blue')
+
+##This could be useful a log transformation
+ggplot(energy, aes(log(Cooling_Load)))+
+  geom_histogram(fill ='blue')
+
+#####################H2o###################################
+###########################################################
+#############    Energy   #################################
+h2o.init(nthreads = -1)
+
+energy.h2o <- as.h2o(energy, destination_frame = 'energy.h2o')
+h2o.describe(energy.h2o)
+h2o.str(energy.h2o)
+
+split <- h2o.splitFrame(energy.h2o, ratios = 0.75)
+energy_train <- split[[1]]
+energy_test <- split[[2]]
+
+energy.rf <- h2o.randomForest(x = 1:8, y = 9, training_frame = energy_train,
+                    ntrees = 50, max_depth = 20, nfolds = 10, seed = 123,
+                    model_id = 'energy_rf01')
+
+h2o.performance(energy.rf, newdata = energy_test)
+
+
+##Grid Search
+## mtries = sqrt(p) in classification or p/3 in regression
+g <- h2o.grid('randomForest',
+              hyper_params = list(
+                ntrees = c(50, 100, 120),
+                max_depth = c(40, 60),
+                mtries = c(2,3,4),
+                min_rows = c(1, 2)),
+              x = 1:8, y = 9, training_frame = energy_train, nfolds = 10
+              )
+
+g
+## We have to re-do the computation with the best fit
+## max_depth = 60, min_rows = 1, ntrees = 50, ntries = 4
+
+energy.rf2 <- h2o.randomForest(x = 1:8, y = 9, training_frame = energy_train,
+                              ntrees = 50, max_depth = 60, min_rows = 1,
+                              mtries = 4,
+                              nfolds = 10, seed = 123,
+                              model_id = 'energy_rf02')
+
+h2o.performance(energy.rf2, newdata = energy_test)
+h2o.varimp_plot(energy.rf2)
+####################### Mnisc DataSet #####################################
+###########################################################################
+
+##Import Data withou R
+mnisc_train <- h2o.importFile(path = 'C:/Users/gusta/Documents/mnist.train.csv')
+mnisc_test <- h2o.importFile(path = 'C:/Users/gusta/Documents/mnist.test.csv')
+h2o.str(mnisc_train)
+h2o.dim(mnisc_train)
+
+##Convert Y to factor
+mnisc_train[,785] <- as.factor(mnisc_train[,785])
+mnisc_test[,785] <- as.factor(mnisc_test[,785])
+
+
+##split Validation
+parts <- h2o.splitFrame(mnisc_train, 1.0/6.0)
+valid <- parts[[1]]
+train <- parts[[2]]
+
+##Simple Random forest wiht validation without crossvalidation
+energy.mist <- h2o.randomForest(x = 1:784, y = 785, training_frame = train,
+                              validation_frame = valid, ntrees = 50, max_depth = 20, nfolds = 0, seed = 123,
+                              model_id = 'mnist_rf01')
+
+h2o.performance(energy.mist, newdata = mnisc_test)
+
+
+################### Footbool DataSet #######################################
+############################################################################
+
+#Load data in h2o
+foot_train <- h2o.importFile(path = 'https://raw.githubusercontent.com/DarrenCook/h2o/bk/datasets/football.train2.csv')
+foot_valid <- h2o.importFile(path = 'https://raw.githubusercontent.com/DarrenCook/h2o/bk/datasets/football.valid2.csv')
+foot_test <- h2o.importFile(path = 'https://raw.githubusercontent.com/DarrenCook/h2o/bk/datasets/football.test2.csv')
+
+h2o.str(foot_train)  
+h2o.dim(foot_train)
+
+h2o.table(foot_train$ScoreDraw)
+h2o.table(foot_train$HomeWin)
+
+##Treat the response as enum
+foot_train['HomeWin'] <- as.factor(foot_train['HomeWin'])
+foot_valid['HomeWin'] <- as.factor(foot_valid['HomeWin'])
+foot_test['HomeWin'] <- as.factor(foot_test['HomeWin'])
+
+
+##Predict Home Win
+stats_fields <- c('FTHG','FTAG','FTR','HTHG','HTAG','HTR',
+                  'HS','AS','HST','AST','HF','AF',
+                  'HC','AC','HY','AY','HR','AR')
+
+excluded_cols <- c('Div','Date','HomeTeam','AwayTeam','HomeWin','ScoreDraw',
+                   stats_fields)
+
+x <- setdiff(names(foot_train), excluded_cols)
+y = 'HomeWin'
+
+##First Model
+foot.rf <- h2o.randomForest(x = x, y = y, training_frame = foot_train,
+                            validation_frame = foot_valid, model_id = 'foot_rf01') 
+
+h2o.performance(foot.rf, newdata = foot_test)
+h2o.varimp_plot(foot.rf)
