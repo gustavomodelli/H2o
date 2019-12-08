@@ -1,0 +1,99 @@
+library(tidyverse)
+library(recipes)
+
+setwd('C:/users/gusta/Dropbox/estatistica/heart')
+
+heart <- read.csv('heart.csv', stringsAsFactors = FALSE)
+str(heart)
+dim(heart)
+
+#names
+nomes <- str_c("'", names(heart), "'", collapse = ',')
+
+nomes <- c('age','sex','cp','trestbps','chol','fbs','restecg','thalach','exang','oldpeak','slope','ca','thal','target')
+names(heart) <- nomes
+
+heart <- heart %>% 
+  mutate(
+        sex = factor(sex, labels = c('female','male')),
+        cp = factor(cp),
+        fbs = factor(fbs, labels = c('<120','>120')),
+        restecg = factor(restecg),
+        exang = factor(exang, labels = c('no','yes')),
+        ca = factor(ca),
+        thal = factor(thal),
+        target = factor(target, labels = c('no','yes'))
+  )
+
+
+##using recipes
+rec <- recipe(target ~ . , data = heart) %>% 
+  step_BoxCox(all_numeric()) %>% 
+  step_center(all_numeric()) %>% 
+  step_scale(all_numeric()) %>% 
+  step_corr(all_numeric(), threshold = 0.9) %>%
+  step_dummy(all_nominal(), - all_outcomes()) %>%
+  step_nzv(all_predictors())
+
+preparo <- prep(rec, heart)
+heart_prep <- bake(preparo, heart)
+
+
+#######################H2o #####################################
+library(h2o)
+
+h2o.init(nthreads = -1)
+
+heart.h2o <- as.h2o(heart_prep, destination_frame = 'heart.h2o')
+
+##split
+split <- h2o.splitFrame(heart.h2o, ratios = 0.8)
+heart.train <- split[[1]]
+heart.test <- split[[2]]
+
+##names
+x <- setdiff(names(heart.h2o), 'target')
+y <- 'target'
+
+
+##Model glm wiht lasso
+##To essemble 
+## fold_assignment = 'Modulo',
+##keep_cross_validation_predictios = TRUE
+
+h2o.glm <- h2o.glm(x = x, y = y, training_frame = heart.train, nfolds = 10,
+                   seed = 123, lambda_search = TRUE, family = 'binomial',
+                   fold_assignment = 'Modulo', keep_cross_validation_predictions = TRUE)
+h2o.glm
+h2o.performance(h2o.glm, newdata = heart.test)
+h2o.varimp_plot(h2o.glm)
+
+##Model Random forest
+h2o.rf <- h2o.randomForest(x = x, y = y, training_frame = heart.train,
+                           nfolds = 10, seed = 123,
+                           max_depth = 10, min_rows = 1, mtries = 7,
+                           ntrees = 100,
+                           fold_assignment = 'Modulo', keep_cross_validation_predictions = TRUE)
+h2o.performance(h2o.rf, newdata = heart.test)
+h2o.varimp_plot(h2o.rf)
+
+##tuned
+g <- h2o.grid('randomForest',
+              hyper_params = list(
+                ntrees = c(50, 100, 120),
+                max_depth = c(10, 20, 40),
+                mtries = c(5,7,10),
+                min_rows = c(1, 2)), 
+              x = x, y = y, training_frame = heart.train,
+              nfolds = 10
+              )
+
+############### Stack Essemble ###############################################
+
+models <- c(h2o.glm, h2o.rf)
+
+m.stack <- h2o.stackedEnsemble(x = x, y = y, training_frame = heart.train,
+                               base_models = models)
+
+m.stack
+h2o.performance(m.stack, newdata = heart.test)
