@@ -1,0 +1,184 @@
+library(tidyverse)
+library(recipes)
+library(h2o)
+library(lime)
+
+loan <- read.csv('loan.csv')
+str(loan)
+dim(loan)
+
+loan$bad_loan <- factor(loan$bad_loan, labels = c('bad','good'))
+prop.table(table(loan$bad_loan))
+
+##Esta é um problema desbalanceado
+
+##EDA
+ggplot(loan, aes(bad_loan, loan_amnt))+
+  geom_boxplot()
+
+ggplot(loan, aes(purpose, fill = bad_loan))+
+  geom_bar()+
+  coord_flip()
+
+ggplot(loan, aes(verification_status, fill = bad_loan))+
+  geom_bar()+
+  coord_flip()
+
+##recipes ###############################################################
+
+rec <- recipe(bad_loan ~ . , data = loan) %>% 
+  step_BoxCox(all_numeric()) %>% 
+  step_center(all_numeric()) %>% 
+  step_scale(all_numeric()) %>% 
+  step_medianimpute(all_numeric()) %>% 
+  step_corr(all_numeric(), threshold = 0.9) %>% 
+  step_other(all_nominal(), - all_outcomes(), threshold = 0.01, other = 'others') %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_nzv(all_predictors())
+
+preparo <- prep(rec, loan)
+loan.h2o <- bake(preparo, loan)
+
+
+##Usando PCA 
+rec2 <- rec %>% 
+  step_pca(all_predictors())
+
+
+preparo2 <- prep(rec2, loan)
+loan.pca <- bake(preparo2, loan)
+
+ggplot(loan.pca, aes(PC1, PC2, color = bad_loan))+
+  geom_point()
+
+######################Using h2o ###########################################
+h2o.init(nthreads = -1, max_mem_size = '6g')
+
+loan.h2o <- as.h2o(loan.h2o)
+
+split <- h2o.splitFrame(loan.h2o, ratios = c(0.7, 0.15))
+loan.train <- split[[1]]
+loan.valid <- split[[2]]
+loan.test <- split[[3]]
+
+x <- setdiff(names(loan.h2o), 'bad_loan')
+y <- 'bad_loan'
+
+loan.glm <- h2o.glm(x = x, y = y, training_frame = loan.train, validation_frame = loan.valid,
+                    lambda_search = TRUE, family = 'binomial', balance_classes = TRUE,
+                    nfolds = 5, keep_cross_validation_predictions = TRUE,
+                    fold_assignment = 'Modulo')
+loan.glm
+h2o.varimp_plot(loan.glm)
+h2o.performance(loan.glm, newdata = loan.test)
+
+exp(loan.glm@model$coefficients)
+
+loan.rf <- h2o.randomForest(x = x, y = y, training_frame = loan.train, validation_frame = loan.valid,
+                            ntrees = 100, mtries = 5, max_depth = 20, nfolds = 5,
+                            keep_cross_validation_predictions = TRUE,
+                            fold_assignment = 'Modulo')
+loan.rf
+h2o.varimp_plot(loan.rf)
+
+
+##Tuned Rf
+tuned <- h2o.grid(algorithm = 'randomForest',
+                  x = x, y = y, training_frame = loan.train,
+                  validation_frame = loan.valid,
+                  
+                  search_criteria = list(
+                  strategy = 'RandomDiscrete',
+                  max_models = 50),
+                  
+                  
+                  hyper_params = list(
+                    ntrees = c(50, 100, 150),
+                    mtries = c(5, 7, 10),
+                    max_depth = c(20, 30, 40)
+                  ),
+                  
+                  stopping_tolerance = 0.001,
+                  stopping_rounds = 3,
+                  score_tree_interval = 10,
+                  
+                  )
+
+
+#####GBM ########################################################3
+loan.gbm <- h2o.gbm(x = x, y = y, training_frame = loan.train, validation_frame = loan.valid,
+                    ntrees = 1000,
+                    stopping_rounds = 5,
+                    stopping_tolerance = 0.001,
+                    stopping_metric = 'AUC',
+                    score_tree_interval = 20,
+                    nfolds = 5,
+                    keep_cross_validation_predictions = TRUE,
+                    fold_assignment = 'Modulo')
+
+h2o.performance(loan.gbm, newdata = loan.test)
+plot(loan.gbm, metric = 'AUC')
+
+
+##Com balanceamento de classes
+loan.gbm <- h2o.gbm(x = x, y = y, training_frame = loan.train, validation_frame = loan.valid,
+                    ntrees = 1000, balance_classes = TRUE,
+                    stopping_rounds = 5,
+                    stopping_tolerance = 0.001,
+                    stopping_metric = 'AUC',
+                    score_tree_interval = 20)
+
+h2o.varimp_plot(loan.gbm)
+
+##Deep Learning
+loan.deep <- h2o.deeplearning(x = x, y = y, training_frame = loan.train,
+                              validation_frame = loan.valid,
+                              stopping_metric = 'AUC',
+                              stopping_tolerance = 0.005,
+                              stopping_rounds = 3,
+                              epochs = 1000,
+                              train_samples_per_iteration = 0,
+                              score_interval = 3,
+                              l2 = 0.00001,
+                              activation = 'RectifierWithDropout')
+
+
+
+
+##Suporte de vetores de máquina
+## Este não esta funcionando
+loan.svm <- h2o.psvm(x = x, y = y, training_frame = loan.train,
+                     validation_frame = loan.valid,
+                     kernel_type = c('gaussian'), gamma = -1)
+
+
+##Construir um Essemble
+models <- list(loan.glm, loan.gbm, loan.rf)
+
+loan.essemble <- h2o.stackedEnsemble(x = x, y = y, training_frame = loan.train,
+                                     validation_frame = loan.valid, 
+                                     base_models = models,
+                                     metalearner_algorithm = 'gbm',
+                                     metalearner_nfolds = 5)
+
+loan.essemble
+h2o.performance(loan.essemble, newdata = loan.test)
+
+
+##Testar o modelo localmente
+##Objeto lime
+explain_h2o <- lime(as.data.frame(loan.h2o), h2o.gbm)
+explain_h2o
+
+
+##lime Explain
+explanation_h2o <- explain(
+  x = as.data.frame(loan.h2o[1:6,]), 
+  explainer = explain_h2o, 
+  n_labels = 1, 
+  n_features = 1,
+  kernel_width = 0.5)
+
+##Plots
+plot_features(explanation_caret)
+plot_explanations(explanation_caret)
