@@ -1,0 +1,60 @@
+library(tidyverse)
+library(mlbench)
+library(recipes)
+library(h2o)
+
+data("Ionosphere")
+str(Ionosphere)
+
+##Build a Deep learning Algorithim to Ionosphere
+
+rec <- recipe(Class ~ . , data = Ionosphere) %>% 
+  step_YeoJohnson(all_numeric()) %>% 
+  step_center(all_numeric()) %>% 
+  step_scale(all_numeric()) %>% 
+  step_corr(all_numeric(), threshold = 0.9) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_dummy(all_nominal(), -all_outcomes())
+
+
+preparo <- prep(rec, Ionosphere)
+Ionosphere.h2o <- bake(preparo, Ionosphere)
+str(Ionosphere.h2o)
+table(Ionosphere.h2o$Class)
+
+####h2o init ########################################################
+h2o.init(nthreads = -1, max_mem_size = '6g')
+
+
+##Clean h2o
+h2o.removeAll()
+
+##Load Data
+iono <- as.h2o(Ionosphere.h2o, destination_frame = 'Ionosphere')
+
+##Split
+split <- h2o.splitFrame(iono, ratios = 0.8)
+iono.train <- split[[1]]
+iono.test <- split[[2]]
+
+#Set variables
+x <- setdiff(names(iono.train), 'Class')
+y <- 'Class'
+
+iono.deep <- h2o.deeplearning(x = x, y = y, training_frame = iono.train,
+                              nfolds = 5, model_id = 'iono01',
+                              hidden = c(200,200),
+                              activation = 'RectifierWithDropout',
+                              hidden_dropout_ratios = c(0.5, 0.3),
+                              input_dropout_ratio = 0.3,
+                              l1 = 0.0005,
+                              l2 = 0.0005,
+                              stopping_metric = 'AUC',
+                              stopping_tolerance = 0.001,
+                              stopping_rounds = 4,
+                              epochs = 1000)
+
+h2o.performance(iono.deep, newdata = iono.test)
+plot(iono.deep)
+
+##Achive an acuracy of 0.9967 in test !!!
