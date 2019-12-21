@@ -1,0 +1,134 @@
+library(dials)
+library(recipes)
+library(tidyverse)
+library(GGally)
+
+data("Chicago")
+dim(Chicago)
+str(Chicago)
+
+##Plots
+ggpairs(Chicago[1:10])
+
+
+
+##All variavel all high correlated
+##Extract a pricipal components
+##Recipes
+rec <- recipe(ridership ~ . , data = Chicago) %>% 
+  step_BoxCox(all_numeric(), - all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), - all_outcomes()) %>% 
+  step_pca(all_numeric(), -all_outcomes(), num_comp = 5) %>%
+  step_date(date, features = c('dow','month', 'year')) %>% 
+  ##Extrai feriados
+  step_holiday(date, holidays = c('LaborDay','NewYearsDay','ChristmasDay',
+                                  'Easter','USThanksgivingDay')) %>% 
+  ##Coluna de feriados
+  step_mutate(holiday = ifelse(date_LaborDay == 1 | date_NewYearsDay == 1 |
+                                 date_ChristmasDay == 1 | date_Easter == 1 |
+                                 date_USThanksgivingDay == 1, 'holiday','not-holiday')
+    
+  ) %>% 
+  step_string2factor(holiday) %>% 
+  step_rm(one_of('date_LaborDay','date_NewYearsDay','date_ChristmasDay',
+                   'date_Easter','date_USThanksgivingDay')) %>% 
+  step_dummy(all_nominal()) %>% 
+  step_zv(all_predictors()) %>% 
+  step_rm(date)
+
+preparo <- prep(rec, Chicago)  
+chicago.new <- bake(preparo, Chicago)
+
+##Plots
+ggplot(chicago.new, aes(PC01))+
+  geom_histogram(fill = 'blue')+
+  geom_histogram(aes(ridership), fill = 'red')
+
+ggplot(chicago.new, aes(date_year, ridership))+
+  geom_point()
+
+ggplot(chicago.new, aes(as.factor(holiday_not.holiday), ridership))+
+  geom_boxplot()
+
+##Teste linear model
+library(splines)
+model_x0 <- lm(ridership ~ date_year, data = chicago.new)
+summary(model_x0)
+
+model_x1 <- lm(ridership ~ ns(date_year, 2), data = chicago.new)
+summary(model_x1)
+
+model_x3 <- lm(ridership ~ PC01, data = chicago.new)
+summary(model_x3)
+
+##Retirar acentos da coluna
+colunas <- str_c("'", names(chicago.new), "'", collapse = ' , ')
+novas <- c('ridership' , 'PC1' , 'PC2' , 'PC3' , 'PC4' , 'PC5' , 'date_year' , 'date_dow_seg' , 'date_dow_ter' , 'date_dow_qua' , 'date_dow_qui' , 'date_dow_sex' , 'date_dow_sab' , 'date_month_fev' , 'date_month_mar' , 'date_month_abr' , 'date_month_mai' , 'date_month_jun' , 'date_month_jul' , 'date_month_ago' , 'date_month_set' , 'date_month_out' , 'date_month_nov' , 'date_month_dez' , 'holiday_not.holiday')
+names(chicago.new) <- novas
+
+#### Model with H2o #####################################################
+library(h2o)
+
+h2o.init(nthreads = -1)
+
+chicago <- as.h2o(chicago.new, destination_frame = 'chicago')
+
+###Slipt the data
+split <- h2o.splitFrame(chicago, ratios = 0.75)
+chicago.train <- split[[1]]
+chicago.test <- split[[2]]
+
+##Features
+x <- setdiff(names(chicago), 'ridership')
+y <- 'ridership'
+
+##models
+chicago.glm <- h2o.glm(x = x, y = y, training_frame = chicago.train,
+                       nfolds = 10, family = 'gaussian', keep_cross_validation_predictions = TRUE,
+                       fold_assignment = 'Modulo')
+
+chicago.glm
+h2o.performance(chicago.glm)
+h2o.varimp_plot(chicago.glm)
+
+
+##randoForest
+chicago.rf <- h2o.randomForest(x = x, y = y, training_frame = chicago.train,
+                                nfolds = 10, keep_cross_validation_predictions = TRUE,
+                               fold_assignment = 'Modulo')
+chicago.rf
+h2o.performance(chicago.rf)
+h2o.varimp_plot(chicago.rf)
+
+
+##gbm
+chicago.gbm <- h2o.gbm(x = x, y = y, training_frame = chicago.train,
+                       nfolds = 10)
+
+chicago.gbm
+h2o.varimp_plot(chicago.gbm)
+
+
+##Model Esemble
+models <- c(chicago.glm, chicago.rf)
+
+chicago.esemble <- h2o.stackedEnsemble(x = x, y = y, training_frame = chicago.train,
+                                       base_models = models)
+
+##Best model was the essemble
+chicago.esemble
+h2o.performance(chicago.esemble, newdata = chicago.train)
+predito <- h2o.predict(chicago.esemble, newdata = chicago.train)
+
+
+##Construi gráficos do valor predito
+new.chicago <- h2o.cbind(chicago.train, predito)
+chicago.pred <- as.data.frame(new.chicago)
+
+ggplot(chicago.pred, aes(predict, ridership))+
+  geom_point()
+
+ggplot(chicago.pred, aes(ridership))+
+  geom_histogram(fill = 'blue')+
+  geom_histogram(aes(predict), fill = 'red')
