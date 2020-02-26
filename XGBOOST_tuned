@@ -1,0 +1,21 @@
+hyper_params <- list(ntrees = seq(10, 1000, 10),
+                     learn_rate = c(0.1, 0.2),
+                     max_depth = seq(1, 20, 1),
+                     sample_rate = c(0.25, 0,5, 1.0),
+                     col_sample_rate = c(0.25, 0.5, 1.0) )
+search_criteria <- list(strategy = "RandomDiscrete",
+                        max_models = 10, 
+                        seed = 1)
+
+# Train the grid
+xgb_grid <- h2o.grid(algorithm = "xgboost",
+                     x = x, y = y,
+                     training_frame = bike.train,
+                     nfolds = 5,
+                     seed = 1,
+                     hyper_params = hyper_params,
+                     search_criteria = search_criteria,
+                     stopping_tolerance = 0.001,
+                     stopping_rounds = 3)
+
+xgb_grid
